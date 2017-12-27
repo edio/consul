@@ -130,6 +130,9 @@ type Agent struct {
 	// checkTCPs maps the check ID to an associated TCP check
 	checkTCPs map[types.CheckID]*checks.CheckTCP
 
+	// checkGRPCs maps the check ID to an associated GRPC check
+	checkGRPCs map[types.CheckID]*checks.CheckGRPC
+
 	// checkTTLs maps the check ID to an associated check TTL
 	checkTTLs map[types.CheckID]*checks.CheckTTL
 
@@ -141,6 +144,9 @@ type Agent struct {
 
 	// dockerClient is the client for performing docker health checks.
 	dockerClient *checks.DockerClient
+
+	// grpcConnectionPool is the pool of persistent connections to gRPC applications
+	grpcConnectionPool *checks.GrpcConnectionPool
 
 	// eventCh is used to receive user events
 	eventCh chan serf.UserEvent
@@ -212,6 +218,7 @@ func New(c *config.RuntimeConfig) (*Agent, error) {
 		checkTTLs:       make(map[types.CheckID]*checks.CheckTTL),
 		checkHTTPs:      make(map[types.CheckID]*checks.CheckHTTP),
 		checkTCPs:       make(map[types.CheckID]*checks.CheckTCP),
+		checkGRPCs:      make(map[types.CheckID]*checks.CheckGRPC),
 		checkDockers:    make(map[types.CheckID]*checks.CheckDocker),
 		eventCh:         make(chan serf.UserEvent, 1024),
 		eventBuf:        make([]*UserEvent, 256),
@@ -1170,6 +1177,9 @@ func (a *Agent) ShutdownAgent() error {
 	for _, chk := range a.checkTCPs {
 		chk.Stop()
 	}
+	for _, chk := range a.checkGRPCs {
+		chk.Stop()
+	}
 	for _, chk := range a.checkDockers {
 		chk.Stop()
 	}
@@ -1759,6 +1769,34 @@ func (a *Agent) AddCheck(check *structs.HealthCheck, chkType *structs.CheckType,
 			tcp.Start()
 			a.checkTCPs[check.CheckID] = tcp
 
+		case chkType.IsGRPC():
+			if existing, ok := a.checkGRPCs[check.CheckID]; ok {
+				existing.Stop()
+				delete(a.checkGRPCs, check.CheckID)
+			}
+			if chkType.Interval < checks.MinInterval {
+				a.logger.Println(fmt.Sprintf("[WARN] agent: check '%s' has interval below minimum of %v",
+					check.CheckID, checks.MinInterval))
+				chkType.Interval = checks.MinInterval
+			}
+			if a.grpcConnectionPool == nil {
+				a.grpcConnectionPool = checks.NewGrpcConnectionPool(a.logger)
+			}
+
+			// TODO implement TLS
+
+			grpc := &checks.CheckGRPC{
+				Notify:   a.State,
+				CheckID:  check.CheckID,
+				GRPC:     chkType.GRPC,
+				Interval: chkType.Interval,
+				Timeout:  chkType.Timeout,
+				Logger:   a.logger,
+				Pool:     a.grpcConnectionPool,
+			}
+			grpc.Start()
+			a.checkGRPCs[check.CheckID] = grpc
+
 		case chkType.IsDocker():
 			if existing, ok := a.checkDockers[check.CheckID]; ok {
 				existing.Stop()
@@ -1904,6 +1942,10 @@ func (a *Agent) cancelCheckMonitors(checkID types.CheckID) {
 	if check, ok := a.checkTCPs[checkID]; ok {
 		check.Stop()
 		delete(a.checkTCPs, checkID)
+	}
+	if check, ok := a.checkGRPCs[checkID]; ok {
+		check.Stop()
+		delete(a.checkGRPCs, checkID)
 	}
 	if check, ok := a.checkTTLs[checkID]; ok {
 		check.Stop()

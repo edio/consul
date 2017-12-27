@@ -30,6 +30,7 @@ type CheckDefinition struct {
 	Interval                       time.Duration
 	DockerContainerID              string
 	Shell                          string
+	GRPC                           string
 	TLSSkipVerify                  bool
 	Timeout                        time.Duration
 	TTL                            time.Duration
